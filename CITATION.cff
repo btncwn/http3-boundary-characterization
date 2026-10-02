@@ -3,14 +3,21 @@ version: "1.0.0"
 date-released: "2026-10-02"
 message: >-
   Please cite the preprint using preferred-citation.
-  The DOI has been reserved for the Zenodo record; registration occurs
-  when that record is published.
+  Version DOI 10.5281/zenodo.23110774; concept DOI (all versions)
+  10.5281/zenodo.23110773.
 title: "HTTP/3-to-HTTP/1.1 Boundary Handling: A Source-Led Characterization of Six Open-Source Stacks"
 authors:
   - family-names: Acar
     given-names: Turhan
 license: CC-BY-4.0
 url: "https://github.com/btncwn/http3-boundary-characterization"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.23110774"
+    description: "Zenodo archive, version 1.0.0"
+  - type: doi
+    value: "10.5281/zenodo.23110773"
+    description: "Zenodo concept DOI (all versions)"
 preferred-citation:
   type: unpublished
   status: preprint
@@ -21,4 +28,4 @@ preferred-citation:
       given-names: Turhan
   doi: "10.5281/zenodo.23110774"
   url: "https://github.com/btncwn/http3-boundary-characterization"
-  notes: "Research preprint; not peer reviewed. DOI registration requires publication of the Zenodo record."
+  notes: "Research preprint; not peer reviewed. Archived on Zenodo on 2 October 2026; the concept DOI 10.5281/zenodo.23110773 cites all versions."

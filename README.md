@@ -30,9 +30,10 @@ For exact qualifications and references, use the paper. The evidence notes are r
 
 Repository: <https://github.com/btncwn/http3-boundary-characterization>
 
-Archive DOI: [10.5281/zenodo.23110774](https://doi.org/10.5281/zenodo.23110774)
+Archive DOI (this version, 1.0.0): [10.5281/zenodo.23110774](https://doi.org/10.5281/zenodo.23110774)  
+Concept DOI (all versions; resolves to the latest): [10.5281/zenodo.23110773](https://doi.org/10.5281/zenodo.23110773)
 
-The DOI has been reserved for the Zenodo record. It becomes registered when that record is published; reserving an identifier does not itself establish publication or peer review. Until it resolves, use the repository and the supplied PDF. Machine-readable manuscript citation metadata is provided in [CITATION.cff](CITATION.cff), using its `preferred-citation` entry.
+The Zenodo record was published on 2 October 2026 with the same `main.pdf` and release ZIP as GitHub release v1.0.0; the manuscript digests are listed below and the ZIP digest is on the release page. A DOI records archival deposit; it does not establish peer review. Machine-readable manuscript citation metadata is provided in [CITATION.cff](CITATION.cff), using its `preferred-citation` entry.
 
 ## Files and integrity
 
