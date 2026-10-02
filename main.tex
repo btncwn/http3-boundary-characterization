@@ -1,0 +1,252 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{booktabs,longtable,array}
+\usepackage{xurl}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\setlist{nosep,leftmargin=*}
+\setlength{\parskip}{0.35em}
+\setlength{\parindent}{0pt}
+\setlength{\emergencystretch}{2em}
+\newcommand{\code}[1]{\nolinkurl{#1}}
+\newcommand{\pin}[2]{\href{#1}{\nolinkurl{#2}}}
+\newcommand{\state}[1]{\textsc{#1}}
+\hypersetup{pdftitle={HTTP/3-to-HTTP/1.1 Boundary Handling: A Source-Led Characterization of Six Open-Source Stacks},pdfauthor={Turhan Acar},pdfsubject={Bounded source analysis and upstream correctness contributions}}
+
+\title{HTTP/3-to-HTTP/1.1 Boundary Handling:\\A Source-Led Characterization of Six Open-Source Stacks}
+\author{Turhan Acar\\\small\href{mailto:ttrnn47@gmail.com}{ttrnn47@gmail.com}}
+\date{2 October 2026}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+HTTP/3 reverse proxies forwarding to HTTP/1.1 origins must reconcile stream completion, body-byte accounting, downstream framing, and backend connection reuse. We present a bounded source analysis using six illustrative cases: HAProxy, nginx, Envoy/QUICHE, Caddy/quic-go, nghttp3/ngtcp2 through nghttpx, and Apache Traffic Server. Publicly disclosed HAProxy and Envoy defects motivate an obligation-by-obligation evidence matrix, distinguishing supported local properties from partial and open paths. HAProxy contributes complementary remediation changes, not an independently traced end-to-end deployment; Envoy's headers-only check is qualified by a default-on runtime guard. nginx and nghttpx expose different placements of length validation, but the inspected nginx reuse path remains unresolved. The ATS inspection supports only a no-early-credit observation at one adaptor, leaving end-to-end framing unresolved. No Caddy body-desynchronization result is claimed. Positive source conclusions identify a revision, path, and stated condition. The contribution is the bounded cross-implementation mapping and its explicit evidence gaps, not discovery of the public defects. No new vulnerability, dynamic experiment, or implementation-wide immunity is claimed.
+\end{abstract}
+\vspace{0.3em}
+{\footnotesize Copyright 2026 Turhan Acar. Licensed under \href{https://creativecommons.org/licenses/by/4.0/}{CC BY 4.0}.}
+
+\section{Introduction}
+Protocol translation preserves application semantics only if it also preserves message boundaries. HTTP/3 carries message bodies on framed QUIC streams, whereas HTTP/1.1 uses message-length rules on connections that may carry successive requests. A front end can parse individual inputs plausibly while still mishandling the transition between completion of a stream and completion of a message on a reusable backend connection. RFC~9114 defines HTTP/3 frame and message validity; RFC~9112 defines HTTP/1.1 framing and connection management~\cite{rfc9114,rfc9112}.
+
+This paper asks a bounded question: \emph{where, at specified source revisions, are delivered-byte accounting, message-completion validation, and backend reuse coupled, and how far does the inspected evidence support a conclusion?} The question is motivated by public defects, including HAProxy CVE-2026-90678 and CVE-2026-33555 and Envoy CVE-2026-48743~\cite{hap90678,hap33555,envoyadvisory}. It does not ask whether any implementation is free of request smuggling in general.
+
+The contribution is a cross-implementation mapping of four boundary obligations---accounting, completion, HTTP/1 framing, and reuse---at immutable revisions. The resulting matrix distinguishes a locally supported property from an untraced link rather than assigning one security rating to an entire stack. This mapping is the present analysis; the motivating vulnerabilities and their fixes are public prior work, not new discoveries. The study is descriptive and source-led; it introduces neither an exploit nor a formal verification procedure. Two related engineering artifacts are documented separately in Appendix~\ref{sec:correctness} and are not evidence for the central body-framing claims.
+
+The six cases form an illustrative set drawn from the source investigations available to the author in September 2026, not a prespecified sampling universe. Each has publicly inspectable HTTP/3 frontend or integration code relevant to HTTP/1 forwarding; inclusion does not require a completed source argument. Caddy is retained to expose the distinction between a named candidate and an established result. No systematic search for all eligible proxies, exclusion census, or representativeness claim is made. Shared transport libraries do not make the stacks independent experimental samples: Envoy consumes QUICHE, Caddy consumes quic-go, and nghttpx consumes nghttp3/ngtcp2. Conclusions about an integration do not automatically transfer to other consumers of its libraries.
+
+\section{Scope and evidence semantics}
+\subsection{Boundary under study}
+The inspected setting is an HTTP/3 front end translating requests to an HTTP/1.1 origin. The relevant failure family involves disagreement among body length, stream completion, and eligibility for subsequent use of an origin connection. Truncated DATA frames and a body-length declaration unmatched by delivered data are related but distinct cases: a DATA-parser guard alone does not establish coverage of a headers-only completion path. The HTTP/3 requirements for malformed messaging and truncated frames are separate inspection obligations~\cite{rfc9114}.
+
+The source inspection considers four obligations:
+\begin{enumerate}
+\item \textbf{Accounting (A):} does the inspected body callback or adaptor credit delivered bytes rather than a declaration of future bytes?
+\item \textbf{Completion (C):} which paths reconcile frame completion and declared message length before treating a request as complete?
+\item \textbf{HTTP/1 framing (F):} does the inspected serializer derive emitted body framing from the bytes and completion state it is given?
+\item \textbf{Reuse (R):} what request/response state and error conditions govern returning an origin connection to a pool?
+\end{enumerate}
+These questions are an analysis rubric, not a retrospectively claimed preregistration. A favorable answer at one layer may support a narrower conclusion than end-to-end containment. A correctness deviation also need not create a cross-request security effect.
+
+\subsection{Evidence states}
+The states in Table~\ref{tab:matrix} describe \emph{local evidence for each obligation}, not product security ratings:
+\begin{description}
+\item[Supported (S):] named source statements support the local property under the stated conditions. This is not an exhaustive control-flow proof, a whole-obligation certificate, or coverage of all configurations.
+\item[Partial (P):] a relevant guard or change has been identified, but the stated connection to the obligation is incomplete.
+\item[Open (O):] the present evidence does not establish the requested disposition; this includes uninspected links.
+\item[Non-result:] an attempted observation lacks a qualifying durable record or ended in an apparatus failure and is excluded from target conclusions.
+\end{description}
+An \state{Open} or \state{Non-result} entry is not evidence that a target is vulnerable or immune. The table has no aggregate ``complete'' verdict: even a row of S entries remains limited to its named paths. Manual source analysis can identify guards and trace data flow; absence of an identified counterexample is not a proof that none exists. We therefore avoid implementation-wide ``immune'' or ``unbypassable'' labels.
+
+\section{Method and provenance}
+For each case, we identify a revision and the entrypoint already named in the source investigation or public remediation record. We then follow the relevant data callback or adaptor, its delivered-byte accounting, its completion predicate, and, where inspected, the HTTP/1 body writer and connection-detachment predicate. Each named link receives its own S, P, or O state; an untraced serializer or pool is not filled in by inference from a parser guard. The accompanying claim matrix records the inspected functions and the stopping boundary. This is a documentation protocol for the present readings, not an assertion that all alternative callbacks or configurations were searched. The dated source snapshot is the unit of analysis. Release names, version-bump commits, development snapshots, code fixes, backports, and merge commits are distinguished in Appendix~\ref{app:pins}.
+
+The detailed source readings originated in September 2026. On 2 October 2026, an AI-assisted author-side cross-check compared the recorded predicates with the cited pinned files and checked attribution and release statements against public change records. No independent human replication is claimed by this step. This paper does not assert that every current branch was audited. An immutable commit pins a past tree; it does not imply that the tree is the latest release, that it was built successfully, or that its behavior was measured.
+
+The present result set is source-led. No new dynamic experiment was performed for this manuscript. Historical observations lacking a retained qualifying run record or ending in instrument error are non-results and are excluded, not used as comparative rows. Neither response counts nor timings from those records are used as target evidence. Public tests accompanying the engineering artifacts in Appendix~\ref{sec:correctness} are upstream artifacts; we do not claim to have rerun them for this paper.
+
+Source inspectability here means that a reader can locate the exact tree and inspect the named functions and conditions. It does not imply a systematic search over all source paths or a runnable dynamic-reproduction package. The paper includes no stimulus generator, attack payload, or exploit procedure.
+
+\section{Comparative source results}
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Case & Accounting & Completion & H1 framing & Reuse \\
+\midrule
+HAProxy changes & O & S (fix) & O & P (fix) \\
+nginx & S & S & S & O \\
+Envoy/QUICHE & S & S & O & O \\
+Caddy/quic-go & O & O & O & O \\
+nghttpx stack & S & S & S & S \\
+ATS & S & O & O & O \\
+\bottomrule
+\end{tabular}
+\caption{Local source evidence, not security ratings. S: supported local property; P: partial; O: open. HAProxy records two complementary changes, not a single traced deployment. Envoy completion requires its named runtime guard. ATS accounting covers only its DATA adaptor. Detailed limits appear in the case subsections.}
+\label{tab:matrix}
+\end{table}
+
+\subsection{HAProxy: complementary remediation changes}
+The public CVE-2026-90678 record identifies affected stable ranges 3.3.0--3.3.14 and 3.4.0--3.4.4, and development versions 3.5-dev1--3.5-dev5; it explicitly marks 3.5-dev6 unaffected~\cite{hap90678}. HAProxy's stable-branch changelogs place the remediation in 3.3.15 and 3.4.5~\cite{hapstable}. These ranges do not mean that every deployment is exposed: the advisory concerns QUIC-enabled HTTP/3 front ends forwarding to HTTP/1.1 backends under its specified framing and connection-reuse conditions.
+
+Two distinct changes support the remediation account. Commit \code{86a4ebc761a278838e8cb06f3a292282ba704c65} adds frame-completeness checks in \code{src/h3.c}, covering the FIN/EOM path and the DATA parsing loop~\cite{haph3fix}. Commit \code{4721a96f161b83cbb5015d15821e84e16fe21151} separately strengthens \code{src/mux_h1.c} to treat remaining short-message data as an error without requiring a Content-Length flag~\cite{haph1fix}. The earlier condition had covered Content-Length messages; this hardening extends the check to the chunked/no-Content-Length case.
+
+The supported conclusion is that the remediation includes complementary H3 and H1 changes. This row does not trace one exact built tree through all four obligations and does not establish independence of the defenses. The H1 change is not characterized as an already-present independent defense of the affected 3.4.4 path. The analysis neither establishes exhaustive non-bypassability nor claims novelty in the public fix. The related CVE-2026-33555 is retained as public context for a distinct completion path, not collapsed into the truncated-DATA check~\cite{hap33555}.
+
+\subsection{nginx: delivered-byte accounting at a development snapshot}
+The inspected revision is \code{ef0aa967dce9d30b824d4c839d3579d2a17e0666}. Its source version reads 1.31.7; it is treated as a mainline development snapshot, not as a released 1.31.7 package~\cite{nginxpin}.
+
+In \code{ngx_http_v3_request_body_filter}, the amount copied into the body chain is bounded by available buffer bytes and the remaining frame payload. The delivered-byte count increases by the copied amount. The end-of-input handling rejects a remaining frame payload and checks the delivered count against an existing Content-Length; absent such a declaration, the count is derived from received bytes~\cite{nginxbody}. The DATA parser keeps the declaration in parser state, while the standard HTTP proxy chunk writer sizes chunks from actual buffer contents and emits a terminal chunk only on its final-buffer marker~\cite{nginxparse,nginxwriter}. These predicates support the bounded source argument for body accounting and end validation.
+
+The conclusion is scoped to the inspected body-filter path and the ordinary buffered reverse-proxy use of that path. It does not cover arbitrary modules, changed buffering settings, all upstream filters, or every error/reuse interleaving. No live rejection rate, comparative timing, or byte-capture result is claimed for this snapshot.
+
+\subsection{Envoy/QUICHE: a post-remediation, conditional disposition}
+The Envoy pin is \code{bfd41cd54d81cad5975b0443ab9c59543f1bbe18}, using QUICHE \code{5c9cc6b37f55a97071077a6190bf4f0bc7a09c1f}. The public advisory for CVE-2026-48743 records affected and fixed versions for a headers-only HTTP/3 request with an unsatisfied nonzero Content-Length on an HTTP/1 upstream path~\cite{envoyadvisory}. It lists fixes in 1.35.13, 1.36.9, 1.37.5, and 1.38.3. The inspected development revision is therefore analyzed as post-remediation, not as historically immune.
+
+At this revision, \code{OnInitialHeadersComplete} applies a zero-byte end-of-stream accounting check before decoding completed headers when the relevant runtime guard is enabled. The shared accounting helper rejects an end-of-stream Content-Length mismatch. The body path separately accounts for delivered data~\cite{envoysource,envoyhelper}. The headers-only repair is public commit \code{59c7458d4dc48705d4f7b74f8a92912b5ca79822}~\cite{envoyfix}.
+
+The runtime feature, \nolinkurl{envoy.reloadable_features.quic_validate_headers_only_content_length}, is default-on at the inspected pin and can be disabled. The disposition depends on it remaining enabled~\cite{envoyruntime}. This condition is part of the result, not a deployment footnote. QUICHE's decoder interface distinguishes frame metadata from payload delivery; inspecting that decoder does not prove that every consumer handles those signals safely. The argument here is about Envoy's inspected consumer path, including its validation, and makes no ecosystem-wide claim about QUICHE users.
+
+\subsection{Caddy/quic-go: body disposition remains open}
+The baseline Caddy source identity is version 2.11.4 at \code{e2eee6a7fce366321294c9c2a79f3146891dcbdf}. The body-desynchronization question is \state{Open} in this paper. A narrative of an earlier paired experiment is insufficient to establish a reproducible measurement without its qualifying raw artifacts. No claim of wire equivalence, same-connection victim safety, or general body-framing containment is made.
+
+Caddy remains in the matrix to make the coverage gap explicit. Its accepted upgraded-stream correctness change is supported by a separate public artifact and is discussed in Appendix~\ref{sec:correctness}; that change does not answer the open body-framing question.
+
+\subsection{nghttp3/ngtcp2 through nghttpx: library and consumer obligations}
+The pinned integration comprises nghttp3 \code{2304973e5a0c8b1fa4bb380b47945a000357f87f}, ngtcp2 \code{3c23148ef32596cb75720b94615d9650cdec5391}, and nghttp2/nghttpx \code{140157a8d751e9e8b0cc15bf9bc0e2ee0c1ed987}. These are source snapshots. The frontend analyzed is nghttpx, not Apache HTTP Server or a third-party \code{mod_http3} integration.
+
+The inspected nghttp3 DATA path delivers the available payload span to its application callback while keeping remaining frame length in parser state. The end-of-input state check rejects incomplete frames, and HTTP message completion reconciles received content with Content-Length before signaling clean completion~\cite{nghttp3conn,nghttp3http,nghttp3stream}. In nghttpx, chunk emission uses the supplied data span; the request path and connection-detachment predicate connect completion to reuse eligibility~\cite{nghttpxwriter,nghttpxreuse,nghttpxupstream}.
+
+The reuse predicate requires complete request and response states and drained request buffers, among its other conditions. Taken together, these inspected paths support the bounded argument for this integration. The result is not a successful build or a live test, and it does not establish that other consumers use the library correctly. The presence of ngtcp2 in the provenance identifies the transport integration; it is not a claim that every ngtcp2 transport path was independently audited.
+
+\subsection{Apache Traffic Server: a partial adaptor observation}
+At ATS commit \code{ca133303832de2cb0c1d5b2ea38c9d2cc5d53820}, an 11.0.0 development tree, \code{Http3StreamDataVIOAdaptor::handle_frame} transfers available data from the bounded frame reader, and \code{finalize} sets the sink byte count from completed delivery~\cite{atsh3,atsframe}. This supports a local no-early-credit observation for the inspected DATA adaptor.
+
+It does not establish the complete HTTP/1 origin framing, all forwarding modes, or the standalone-FIN/nonzero-Content-Length sibling. Those remain \state{Open}. ATS explicitly describes HTTP/3 and QUIC as experimental~\cite{atspolicy}; the presence of this code must not be confused with a mature default HTTP/3 deployment.
+
+Two public HTTP/1 parser fixes provide adjacent context. CVE-2026-24033 is fixed in 9.2.15/10.1.4, while CVE-2025-65114 is fixed in 9.2.13/10.1.2~\cite{ats24033,ats65114}. Their branch-specific \emph{code fixes} and release identities are distinguished in Appendix~\ref{app:pins}. The lower 9.2.13/10.1.2 floor does not cover both issues. These HTTP/1 fixes do not resolve the open HTTP/3 questions in this paper.
+
+
+\section{Interpretation and limitations}
+The comparison separates four obligations that are often compressed into a single disposition: message-body accounting, completion validation, HTTP/1 serialization, and origin-connection lifecycle. A favorable local result does not fill another column. Coexistence of checks does not establish their independence, and public patch history is not equivalent to a full end-to-end source trace.
+
+The observed diversity also limits simple labels. nginx validates through its body filter; Envoy needs a completion check outside the ordinary body-data path; nghttpx's argument spans library validation and consumer reuse conditions. ATS shows why a favorable local adaptor observation cannot be promoted to an end-to-end conclusion. Caddy shows why a retained narrative and an accepted but different correctness fix cannot fill an empirical gap.
+
+\textbf{Internal validity.} Source readings may miss alternate callbacks, build options, error paths, runtime overrides, or transformations outside the inspected boundary. No model checker or exhaustive control-flow analysis was used. An explicit predicate at a pinned location supports a narrow local inference; an instrument-failing run supports no target-behavior inference. Neither establishes universal behavior. AI-assisted cross-checking may repeat a shared error and is not independent replication.
+
+\textbf{External validity.} The sample is purposive, versions are heterogeneous, and some pins are development snapshots. No prevalence, deployment coverage, performance, or security ranking is inferred. The results do not transfer automatically to newer releases or other consumers of the same library.
+
+\textbf{Evidence completeness.} No dynamic result is claimed. Historical records excluded as non-results are not used to raise confidence in a source conclusion. The accepted upstream patches document specific fixes and public review history; their tests are not presented as newly executed experiments. Reproducibility is limited to source inspection using the supplied identities and anchors.
+
+\textbf{Scope.} The article covers a narrow body-completion family and two adjacent correctness contributions. It does not characterize all HTTP/1 or HTTP/2 parser discrepancies, authentication, cache behavior, or closed-source edges. An unresolved path is an evidence limit rather than a vulnerability allegation.
+
+\section{Related work}
+Linhart et al. described HTTP request smuggling through inconsistent message interpretation in a 2005 Watchfire white paper~\cite{linhart}. Kettle's practitioner research revisited connection desynchronization and demonstrated the additional risks created by HTTP/2 translation~\cite{kettle2019,kettle2021}. These works establish the context for inspecting boundaries between parsers and protocol versions; they do not support a blanket conclusion about the pins in this study.
+
+T-Reqs applies grammar-based differential fuzzing to HTTP request smuggling~\cite{treqs}. The HTTP Garden studies origin interpretations and gateway transformations using differential fuzzing of request streams~\cite{garden}. Those methods systematically seek discrepancies and measure outcomes. This paper instead contributes a bounded comparative source analysis and an explicit record of where the inspected evidence stops. It neither replaces empirical differential testing nor infers coverage of a larger input space from a small set of paths.
+
+FRAMESHIFTER directly studies HTTP/2-to-HTTP/1 conversion anomalies through grammar-based dynamic fuzzing~\cite{frameshifter}. HDiff combines specification-derived rules with differential testing, while Gudifu uses coverage-guided differential fuzzing for HTTP request parsing~\cite{hdiff,gudifu}. The present analysis differs in protocol focus and evidence type: it maps named H3-to-H1 source obligations and untraced links at fixed revisions, without generating a test corpus or claiming dynamic discovery coverage. This methodological distinction is not a claim of broader coverage or superiority.
+
+The protocol standards supply the expected message and frame semantics~\cite{rfc9112,rfc9114}. The public advisories and individual commits supply historical defect and remediation evidence. The two correctness contributions are identified through their upstream records, with attribution and severity preserved. The absence of a newly disclosed vulnerability is compatible with a source-analysis contribution; the value of the present work rests on the specificity and inspectability of its arguments.
+
+\section{Ethics, assistance, and artifact availability}
+This manuscript is based on public source, public advisories, and accepted upstream changes. It reports no new vulnerability, includes no operational attack instructions, and makes no claim about a third party's deployment. No live target or local proof was executed for this manuscript preparation. The HAProxy and Caddy correctness changes were already submitted and accepted upstream.
+
+Anthropic Claude and OpenAI Codex substantially assisted source navigation, cross-checking, drafting, and document preparation. Turhan Acar directed the work and is responsible for its claims, citations, and final publication decision. Automated author-side checks do not constitute independent peer review. No AI system is an author.
+
+The canonical manuscript is the self-contained \code{main.tex} file, which includes its bibliography. Public source references use full commit identities. The accompanying \code{source-pins.md} and \code{claim-matrix.md} restate the inventory and claim boundaries for inspection. There is no separate dynamic dataset or reproduction harness supporting this paper, and no external artifact URL is required to resolve its source references.
+
+\section{Conclusion}
+At the inspected pins, source arguments about body accounting and completion differ in both location and scope. HAProxy supplies complementary remediation changes; Envoy's completion check depends on a runtime condition and does not by itself close the H1 path. nginx supports local accounting, completion, and framing arguments with reuse untraced; nghttpx has named evidence at all four obligations under its stated scope. ATS remains partial, and the Caddy body question remains open. The obligation-by-obligation matrix exposes these differences without converting missing evidence into a negative result or a product-wide assurance.
+
+\appendix
+\section{Related engineering artifacts}\label{sec:correctness}
+These case studies concern adjacent validation and lifecycle boundaries. They provide publicly inspectable engineering artifacts and are kept separate from the H3 body-disposition matrix. Acceptance of a patch is evidence that it was accepted; it is not an independent security proof for a whole product.
+
+\subsection{HAProxy HTTP/2 response pseudo-header validation}
+Turhan Acar authored commit \code{4ddf219bb399334e00a0b9af2b155884befd4b04}, committed by Willy Tarreau on 24 September 2026~\cite{hapcorrectness}. The change modifies only \code{src/h2.c}, adding \code{H2_PHDR_FND_PROT} to the response-side rejection mask for request-only pseudo-headers in \code{h2_make_htx_response}. The upstream classification is \code{BUG/MINOR}. The protocol context is the restriction of request pseudo-headers from responses and the Extended CONNECT \code{:protocol} field~\cite{rfc9113,rfc8441}; the patch cites the historical RFC~7540~\cite{rfc7540}.
+
+The accepted commit states ``no known security impact.'' Its assessment is that the offending pseudo-header is absent from emitted HTTP/1 and that the effect is tolerating an invalid response rather than rejecting it. We retain that bounded assessment and claim no stronger security conclusion. This contribution is unrelated to the H3 remediation commits discussed above.
+
+\subsection{Caddy upgraded-stream half-close propagation}
+Caddy PR~\#8027, authored by Turhan Acar, was squash-merged on 16 September 2026 as \code{9be8fb279444ec633ae2eea4590a180e1143c8f6}~\cite{caddypr,caddymerge}. This later master change is not present in the v2.11.4 baseline. It changes the upgraded-stream copier in \code{streaming.go} and accompanying tests in \code{streaming_test.go}. A clean directional EOF is propagated to a destination supporting \code{CloseWrite}, allowing the other direction to finish; errors, cancellation, and timeout retain teardown behavior. The public change includes tests covering this lifecycle distinction.
+
+The linked issue describes a correctness/interop defect and explicitly makes no security claim~\cite{caddyissue}. The public work was demonstrated on an HTTP/1.1 Upgrade path, so it is not characterized here as an HTTP/3-specific result. The accepted change provides no evidence of cross-user containment, response-queue poisoning, or global security absence. The immutable squash merge is the contribution pin; a mutable milestone is not treated as a shipped release. The PR's final branch head, \code{2ec7211b42e2bff1c32741b6e271a92bc2da690a}, is a merge of the base branch and must not be mistaken for the author's feature commit.
+
+\section{Immutable source inventory}\label{app:pins}
+All values below are full Git commit identities. Source-only entries identify inspected trees, not tested binaries. Links in the bibliography identify the relevant files/functions at these pins.
+
+\small
+\begin{longtable}{@{}p{0.28\linewidth}p{0.66\linewidth}@{}}
+\toprule Component / purpose & Full identity and qualification \\
+\midrule\endfirsthead
+\toprule Component / purpose & Full identity and qualification (continued) \\
+\midrule\endhead
+\bottomrule\endfoot
+HAProxy H3 completeness & \pin{https://github.com/haproxy/haproxy/commit/86a4ebc761a278838e8cb06f3a292282ba704c65}{86a4ebc761a278838e8cb06f3a292282ba704c65}; code fix in \code{src/h3.c}. \\
+HAProxy H1 reuse hardening & \pin{https://github.com/haproxy/haproxy/commit/4721a96f161b83cbb5015d15821e84e16fe21151}{4721a96f161b83cbb5015d15821e84e16fe21151}; separate code fix in \code{src/mux_h1.c}. \\
+nginx source snapshot & \pin{https://github.com/nginx/nginx/commit/ef0aa967dce9d30b824d4c839d3579d2a17e0666}{ef0aa967dce9d30b824d4c839d3579d2a17e0666}; source version 1.31.7, development snapshot. \\
+Envoy source snapshot & \pin{https://github.com/envoyproxy/envoy/tree/bfd41cd54d81cad5975b0443ab9c59543f1bbe18}{bfd41cd54d81cad5975b0443ab9c59543f1bbe18}; 1.40.0-dev. \\
+QUICHE dependency & \pin{https://github.com/google/quiche/tree/5c9cc6b37f55a97071077a6190bf4f0bc7a09c1f}{5c9cc6b37f55a97071077a6190bf4f0bc7a09c1f}; Envoy dependency; conclusions remain consumer-specific. \\
+Envoy headers-only repair & \pin{https://github.com/envoyproxy/envoy/commit/59c7458d4dc48705d4f7b74f8a92912b5ca79822}{59c7458d4dc48705d4f7b74f8a92912b5ca79822}; runtime-guarded code fix. \\
+Caddy baseline & \pin{https://github.com/caddyserver/caddy/tree/e2eee6a7fce366321294c9c2a79f3146891dcbdf}{e2eee6a7fce366321294c9c2a79f3146891dcbdf}; v2.11.4, body question open. \\
+nghttp3 & \pin{https://github.com/ngtcp2/nghttp3/tree/2304973e5a0c8b1fa4bb380b47945a000357f87f}{2304973e5a0c8b1fa4bb380b47945a000357f87f}; development snapshot. \\
+ngtcp2 & \pin{https://github.com/ngtcp2/ngtcp2/tree/3c23148ef32596cb75720b94615d9650cdec5391}{3c23148ef32596cb75720b94615d9650cdec5391}; transport provenance. \\
+nghttp2 / nghttpx & \pin{https://github.com/nghttp2/nghttp2/tree/140157a8d751e9e8b0cc15bf9bc0e2ee0c1ed987}{140157a8d751e9e8b0cc15bf9bc0e2ee0c1ed987}; frontend source snapshot. \\
+ATS H3 inspection & \pin{https://github.com/apache/trafficserver/tree/ca133303832de2cb0c1d5b2ea38c9d2cc5d53820}{ca133303832de2cb0c1d5b2ea38c9d2cc5d53820}; development tree, experimental H3. \\
+ATS CVE-2026-24033 code fixes & 10.1.x: \pin{https://github.com/apache/trafficserver/commit/bb7f7263dff737c2c895dbb225b5415f93b804d1}{bb7f7263dff737c2c895dbb225b5415f93b804d1}. 9.2.x backport: \pin{https://github.com/apache/trafficserver/commit/e44213f8ec0d1df65de99a15fe2f59c16e01f30b}{e44213f8ec0d1df65de99a15fe2f59c16e01f30b}. \\
+ATS CVE-2025-65114 code fixes & 10.1.x: \pin{https://github.com/apache/trafficserver/commit/7c2c689e5843a3be70b775600b125a2957422209}{7c2c689e5843a3be70b775600b125a2957422209}. 9.2.x backport: \pin{https://github.com/apache/trafficserver/commit/e5accd7929c5cb96a01cc9afda1f6336dab59b64}{e5accd7929c5cb96a01cc9afda1f6336dab59b64}. \\
+ATS release identities & 10.1.4: \pin{https://github.com/apache/trafficserver/commit/f8be6725daee427fbf88f166f14b10cb5525b220}{f8be6725daee427fbf88f166f14b10cb5525b220}; 9.2.15: \pin{https://github.com/apache/trafficserver/commit/f671e525110be50452f607fc1f2657f3dba7fe3b}{f671e525110be50452f607fc1f2657f3dba7fe3b}. 10.1.2: \pin{https://github.com/apache/trafficserver/commit/fd932cb399f0b18d1044700d34bc028edabcb82d}{fd932cb399f0b18d1044700d34bc028edabcb82d}; 9.2.13: \pin{https://github.com/apache/trafficserver/commit/2c83b07b60ec73e4aa48abc10e82b248e3f2a23b}{2c83b07b60ec73e4aa48abc10e82b248e3f2a23b}. These are not the code fixes above. \\
+HAProxy correctness contribution & \pin{https://github.com/haproxy/haproxy/commit/4ddf219bb399334e00a0b9af2b155884befd4b04}{4ddf219bb399334e00a0b9af2b155884befd4b04}; response validation, \code{BUG/MINOR}. \\
+Caddy correctness contribution & \pin{https://github.com/caddyserver/caddy/commit/9be8fb279444ec633ae2eea4590a180e1143c8f6}{9be8fb279444ec633ae2eea4590a180e1143c8f6}; accepted squash merge for PR~\#8027. \\
+\end{longtable}
+\normalsize
+
+\begin{thebibliography}{99}
+\small
+\bibitem{rfc9112} R. Fielding, M. Nottingham, and J. Reschke, eds. \emph{HTTP/1.1}. RFC 9112, June 2022. \url{https://www.rfc-editor.org/rfc/rfc9112.html}.
+\bibitem{rfc9114} M. Bishop, ed. \emph{HTTP/3}. RFC 9114, June 2022. Sections 4.1.2 and 7.1. \url{https://www.rfc-editor.org/rfc/rfc9114.html}.
+\bibitem{hap90678} CVE Program. \emph{CVE-2026-90678}. Public vulnerability record, 2026. \url{https://www.cve.org/CVERecord?id=CVE-2026-90678}.
+\bibitem{hapstable} HAProxy project. Stable-branch changelogs, entries for 3.3.15 and 3.4.5, 2026. \url{https://www.haproxy.org/download/3.3/src/CHANGELOG} and \url{https://www.haproxy.org/download/3.4/src/CHANGELOG}.
+\bibitem{hap33555} CVE Program. \emph{CVE-2026-33555}. Public vulnerability record, 2026. \url{https://www.cve.org/CVERecord?id=CVE-2026-33555}.
+\bibitem{envoyadvisory} Envoy project. \emph{HTTP/3 to HTTP/1 request smuggling via headers-only request with nonzero Content-Length}. GHSA-8phg-2h2q-jgxf / CVE-2026-48743, 23 June 2026. \url{https://github.com/envoyproxy/envoy/security/advisories/GHSA-8phg-2h2q-jgxf}.
+\bibitem{haph3fix} HAProxy project. \emph{BUG/MAJOR: h3: reject H3 truncated frames}. Commit, 2026. \url{https://github.com/haproxy/haproxy/commit/86a4ebc761a278838e8cb06f3a292282ba704c65}.
+\bibitem{haph1fix} HAProxy project. \emph{MEDIUM: mux-h1: Harden test for short data at end of stream}. Commit, 2026. \url{https://github.com/haproxy/haproxy/commit/4721a96f161b83cbb5015d15821e84e16fe21151}.
+\bibitem{nginxpin} nginx project. \emph{Source version 1.31.7}. Version-bump commit, 2026. \url{https://github.com/nginx/nginx/commit/ef0aa967dce9d30b824d4c839d3579d2a17e0666}.
+\bibitem{nginxbody} nginx project. \code{ngx_http_v3_request_body_filter}, pinned source, lines 1660--1749. \url{https://github.com/nginx/nginx/blob/ef0aa967dce9d30b824d4c839d3579d2a17e0666/src/http/v3/ngx_http_v3_request.c#L1660-L1749}.
+\bibitem{nginxparse} nginx project. \code{ngx_http_v3_parse_data}, pinned source. \url{https://github.com/nginx/nginx/blob/ef0aa967dce9d30b824d4c839d3579d2a17e0666/src/http/v3/ngx_http_v3_parse.c#L1800-L1869}.
+\bibitem{nginxwriter} nginx project. Standard HTTP proxy body-output filter, pinned source. \url{https://github.com/nginx/nginx/blob/ef0aa967dce9d30b824d4c839d3579d2a17e0666/src/http/modules/ngx_http_proxy_module.c#L1635-L1760}.
+\bibitem{envoysource} Envoy project. \code{EnvoyQuicServerStream::OnInitialHeadersComplete}, pinned source, lines 184--250. \url{https://github.com/envoyproxy/envoy/blob/bfd41cd54d81cad5975b0443ab9c59543f1bbe18/source/common/quic/envoy_quic_server_stream.cc#L184-L250}. Body accounting: \url{https://github.com/envoyproxy/envoy/blob/bfd41cd54d81cad5975b0443ab9c59543f1bbe18/source/common/quic/envoy_quic_server_stream.cc#L263-L313}.
+\bibitem{envoyhelper} Envoy project. \code{updateReceivedContentBytes}, pinned source, lines 207--219. \url{https://github.com/envoyproxy/envoy/blob/bfd41cd54d81cad5975b0443ab9c59543f1bbe18/source/common/quic/envoy_quic_stream.h#L207-L219}.
+\bibitem{envoyfix} Envoy project. \emph{quic: validate HTTP/3 headers-only request and response content-length}. Commit, 2026. \url{https://github.com/envoyproxy/envoy/commit/59c7458d4dc48705d4f7b74f8a92912b5ca79822}.
+\bibitem{envoyruntime} Envoy project. Runtime feature defaults and registration, pinned source. \url{https://github.com/envoyproxy/envoy/blob/bfd41cd54d81cad5975b0443ab9c59543f1bbe18/source/common/runtime/runtime_features.cc#L20-L32}; guard registration: \url{https://github.com/envoyproxy/envoy/blob/bfd41cd54d81cad5975b0443ab9c59543f1bbe18/source/common/runtime/runtime_features.cc#L147}.
+\bibitem{nghttp3conn} nghttp3 project. \code{nghttp3_conn_read_bidi} DATA and end-of-input states, pinned source, lines 1667--1835. \url{https://github.com/ngtcp2/nghttp3/blob/2304973e5a0c8b1fa4bb380b47945a000357f87f/lib/nghttp3_conn.c#L1667-L1835}.
+\bibitem{nghttp3http} nghttp3 project. \code{nghttp3_http_on_remote_end_stream}, pinned source, lines 629--648. \url{https://github.com/ngtcp2/nghttp3/blob/2304973e5a0c8b1fa4bb380b47945a000357f87f/lib/nghttp3_http.c#L629-L648}.
+\bibitem{nghttp3stream} nghttp3 project. Request MSG\_END processing, pinned source. \url{https://github.com/ngtcp2/nghttp3/blob/2304973e5a0c8b1fa4bb380b47945a000357f87f/lib/nghttp3_stream.c#L1057-L1139}.
+\bibitem{nghttpxwriter} nghttp2 project. nghttpx \code{push_upload_data_chunk} and \code{end_upload_data}, pinned source. \url{https://github.com/nghttp2/nghttp2/blob/140157a8d751e9e8b0cc15bf9bc0e2ee0c1ed987/src/shrpx_http_downstream_connection.cc#L725-L815}.
+\bibitem{nghttpxreuse} nghttp2 project. nghttpx \code{Downstream::can_detach_downstream_connection}, pinned source. \url{https://github.com/nghttp2/nghttp2/blob/140157a8d751e9e8b0cc15bf9bc0e2ee0c1ed987/src/shrpx_downstream.cc#L1150-L1157}.
+\bibitem{nghttpxupstream} nghttp2 project. nghttpx \code{http_recv_data} and \code{http_stream_close}, pinned source. \url{https://github.com/nghttp2/nghttp2/blob/140157a8d751e9e8b0cc15bf9bc0e2ee0c1ed987/src/shrpx_http3_upstream.cc#L2424-L2575}.
+\bibitem{atsh3} Apache Traffic Server project. \code{Http3StreamDataVIOAdaptor::handle_frame} and \code{finalize}, pinned source. \url{https://github.com/apache/trafficserver/blob/ca133303832de2cb0c1d5b2ea38c9d2cc5d53820/src/proxy/http3/Http3StreamDataVIOAdaptor.cc#L45-L77}.
+\bibitem{atsframe} Apache Traffic Server project. DATA readiness and bounded frame dispatch, pinned source. \url{https://github.com/apache/trafficserver/blob/ca133303832de2cb0c1d5b2ea38c9d2cc5d53820/src/proxy/http3/Http3Frame.cc#L248-L258} and \url{https://github.com/apache/trafficserver/blob/ca133303832de2cb0c1d5b2ea38c9d2cc5d53820/src/proxy/http3/Http3FrameDispatcher.cc#L102-L145}.
+\bibitem{atspolicy} Apache Traffic Server project. \emph{Security policy}, including experimental HTTP/3 and QUIC status. Accessed 2 October 2026. \url{https://github.com/apache/trafficserver/security}.
+\bibitem{ats24033} Apache Traffic Server project. \emph{July 2026 CVE release}, CVE-2026-24033. \url{https://trafficserver.apache.org/security-2026-07.html}.
+\bibitem{ats65114} Apache Software Foundation. \emph{CVE-2025-65114: malformed chunked message body allows request smuggling}. Vendor advisory, 2026. \url{https://lists.apache.org/thread/2s11roxlv1j8ph6q52rqo1klvl01n14q}. Record: \url{https://nvd.nist.gov/vuln/detail/CVE-2025-65114}.
+\bibitem{hapcorrectness} T. Acar. \emph{BUG/MINOR: h2: reject :protocol pseudo-header in H2 responses}. HAProxy commit accepted by W. Tarreau, 24 September 2026. \url{https://github.com/haproxy/haproxy/commit/4ddf219bb399334e00a0b9af2b155884befd4b04}.
+\bibitem{rfc7540} M. Belshe, R. Peon, and M. Thomson, eds. \emph{Hypertext Transfer Protocol Version 2 (HTTP/2)}. RFC 7540, May 2015, Section 8.1.2.1. Historical specification cited by the patch; superseded by RFC 9113. \url{https://www.rfc-editor.org/rfc/rfc7540.html#section-8.1.2.1}.
+\bibitem{rfc9113} M. Thomson and C. Benfield, eds. \emph{HTTP/2}. RFC 9113, June 2022, Section 8.3. \url{https://www.rfc-editor.org/rfc/rfc9113.html#section-8.3}.
+\bibitem{rfc8441} P. McManus. \emph{Bootstrapping WebSockets with HTTP/2}. RFC 8441, September 2018. \url{https://www.rfc-editor.org/rfc/rfc8441.html}.
+\bibitem{caddypr} T. Acar. \emph{reverseproxy: propagate TCP half-close on upgraded streams}. Caddy pull request 8027, merged 16 September 2026. \url{https://github.com/caddyserver/caddy/pull/8027}.
+\bibitem{caddymerge} Caddy project. Accepted squash merge for PR 8027, authored by T. Acar. \url{https://github.com/caddyserver/caddy/commit/9be8fb279444ec633ae2eea4590a180e1143c8f6}.
+\bibitem{caddyissue} T. Acar. \emph{reverse\_proxy: client half-close aborts the backend connection on upgraded streams}. Caddy issue 8026, 2026. \url{https://github.com/caddyserver/caddy/issues/8026}.
+\bibitem{linhart} C. Linhart, A. Klein, R. Heled, and S. Orrin. \emph{HTTP Request Smuggling}. Watchfire white paper, 2005. Original document preserved at \url{https://www.cgisecurity.com/lib/HTTP-Request-Smuggling.pdf}.
+\bibitem{kettle2019} J. Kettle. \emph{HTTP Desync Attacks: Request Smuggling Reborn}. PortSwigger Research, 7 August 2019. \url{https://portswigger.net/research/http-desync-attacks-request-smuggling-reborn}.
+\bibitem{kettle2021} J. Kettle. \emph{HTTP/2: The Sequel is Always Worse}. PortSwigger Research, 5 August 2021. \url{https://portswigger.net/research/http2}.
+\bibitem{treqs} B. Jabiyev, S. Sprecher, K. Onarlioglu, and E. Kirda. T-Reqs: HTTP Request Smuggling with Differential Fuzzing. In \emph{Proceedings of the 2021 ACM SIGSAC Conference on Computer and Communications Security}, pp. 1805--1820, 2021. \url{https://doi.org/10.1145/3460120.3485384}.
+\bibitem{garden} B. Kallus, P. Anantharaman, M. E. Locasto, and S. W. Smith. \emph{The HTTP Garden: Discovering Parsing Vulnerabilities in HTTP/1.1 Implementations by Differential Fuzzing of Request Streams}. arXiv:2405.17737, 2024. \url{https://doi.org/10.48550/arXiv.2405.17737}.
+\bibitem{frameshifter} B. Jabiyev, S. Sprecher, A. Gavazzi, T. Innocenti, K. Onarlioglu, and E. Kirda. FRAMESHIFTER: Security Implications of HTTP/2-to-HTTP/1 Conversion Anomalies. In \emph{31st USENIX Security Symposium}, pp. 1061--1075, 2022. \url{https://www.usenix.org/conference/usenixsecurity22/presentation/jabiyev}.
+\bibitem{hdiff} K. Shen, J. Lu, Y. Yang, J. Chen, M. Zhang, H. Duan, J. Zhang, and X. Zheng. HDiff: A Semi-automatic Framework for Discovering Semantic Gap Attack in HTTP Implementations. In \emph{52nd Annual IEEE/IFIP International Conference on Dependable Systems and Networks}, pp. 1--13, 2022. \url{https://doi.org/10.1109/DSN53405.2022.00014}.
+\bibitem{gudifu} B. Jabiyev, A. Gavazzi, K. Onarlioglu, and E. Kirda. Gudifu: Guided Differential Fuzzing for HTTP Request Parsing Discrepancies. In \emph{27th International Symposium on Research in Attacks, Intrusions and Defenses}, pp. 235--247, 2024. \url{https://doi.org/10.1145/3678890.3678904}.
+\end{thebibliography}
+\end{document}
