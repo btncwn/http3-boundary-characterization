@@ -5,7 +5,7 @@
 **Author:** Turhan Acar  
 **Manuscript date:** 2 October 2026  
 **Status:** Research preprint; not peer reviewed.  
-**License:** [CC BY 4.0](LICENSE)
+**License:** [CC BY 4.0](LICENSE.txt)
 
 [Read the paper (PDF)](paper/main.pdf) · [LaTeX source](paper/main.tex) · [Claim matrix](evidence/claim-matrix.md) · [Source identities](evidence/source-pins.md)
 

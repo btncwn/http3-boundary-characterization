@@ -6,7 +6,7 @@ The eight payload files are:
 
 1. `README.md`
 2. `CITATION.cff`
-3. `LICENSE`
+3. `LICENSE.txt`
 4. `CENSUS.md`
 5. `paper/main.pdf`
 6. `paper/main.tex`
